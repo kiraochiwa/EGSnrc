@@ -536,25 +536,25 @@ void EGS_Ensdf::parseEnsdf(vector<string> ensdf) {
     // Print out a summary of the decays
     egsInformation("EGS_Ensdf::parseEnsdf: Summary of %s emissions:\n", radionuclide.c_str());
     egsInformation("========================\n");
-    egsInformation("Energy | Intensity per 100 emissions\n");
-    if(myBetaRecords.size()) {
+    egsInformation("Energy | Intensity per 100 decays\n");
+    if (myBetaRecords.size()) {
         egsInformation("Beta records:\n");
         for (vector<BetaRecordLeaf *>::iterator beta = myBetaRecords.begin();
-                    beta != myBetaRecords.end(); beta++) {
+                beta != myBetaRecords.end(); beta++) {
             egsInformation("%f %f\n", (*beta)->getFinalEnergy(), (*beta)->getBetaIntensity());
         }
     }
-    if(myAlphaRecords.size()) {
+    if (myAlphaRecords.size()) {
         egsInformation("Alpha records:\n");
         for (vector<AlphaRecord *>::iterator alpha = myAlphaRecords.begin();
-                    alpha != myAlphaRecords.end(); alpha++) {
+                alpha != myAlphaRecords.end(); alpha++) {
             egsInformation("%f %f\n", (*alpha)->getFinalEnergy(), (*alpha)->getAlphaIntensity());
         }
     }
-    if(myGammaRecords.size()) {
-        egsInformation("Gamma records (E,Igamma,Iec):\n");
+    if (myGammaRecords.size()) {
+        egsInformation("Gamma records (E,Igamma,Ice):\n");
         for (vector<GammaRecord *>::iterator gamma = myGammaRecords.begin();
-                    gamma != myGammaRecords.end(); gamma++) {
+                gamma != myGammaRecords.end(); gamma++) {
             egsInformation("%f %f %f\n", (*gamma)->getDecayEnergy(), (*gamma)->gammaIntensity, (*gamma)->getTransitionIntensity() - (*gamma)->gammaIntensity);
         }
     }
@@ -767,19 +767,6 @@ void EGS_Ensdf::parseEnsdf(vector<string> ensdf) {
 
         --j;
     }
-
-    for (unsigned int i=0; i < xrayEnergies.size(); ++i) {
-        if (verbose) {
-            egsInformation("EGS_Ensdf::parseEnsdf: XRays (E,I): %f %f\n",
-                           xrayEnergies[i], xrayIntensities[i]);
-        }
-    }
-    for (unsigned int i=0; i < augerEnergies.size(); ++i) {
-        if (verbose) {
-            egsInformation("EGS_Ensdf::parseEnsdf: Auger (E,I): %f %f\n",
-                           augerEnergies[i], augerIntensities[i]);
-        }
-    }
 }
 
 // Create record objects from the arrays
@@ -868,7 +855,7 @@ void EGS_Ensdf::normalizeIntensities() {
     if (verbose) {
         egsInformation("EGS_Ensdf::normalizeIntensities: Normalizing the "
                        "emission intensities to allow for spectrum sampling "
-                       "routines.\n");
+                       "routines...\n");
     }
 
     // Add up the beta, alpha, xray and auger decay intensities
@@ -905,6 +892,30 @@ void EGS_Ensdf::normalizeIntensities() {
 
         totalDecayIntensity += (*gamma)->getTransitionIntensity();
     }
+
+    // Check that the branch probabilities add up to one
+    double branchSum = 0;
+    for (vector<NormalizationRecord * >::iterator norm =
+                myNormalizationRecords.begin();
+            norm!=myNormalizationRecords.end(); norm++) {
+        branchSum += (*norm)->getBranchMultiplier();
+    }
+    // Currently there is only 1 case in the LNHB ensdf data where this is true
+    // It is for Cf-252 fission events
+    if (branchSum < 1-epsilon) {
+        egsWarning("\nEGS_Ensdf::parseEnsdf: Warning: The branching ratios of this nuclide add to less than 1 (%f). The leftover probability will be assigned to fission events. These events will return a zero energy particle and be counted as disintegrations. This is expected for Cf-252 in the LNHB collection.\n\n",branchSum);
+
+        // Add the fission probability to the total decay intensity
+        totalDecayIntensity /= branchSum;
+    } else if(branchSum > 1+epsilon) {
+        egsWarning("\nEGS_Ensdf::parseEnsdf: Warning: The branching ratios of this nuclide add to greater than 1 (%f). This will result in overall emission rates being incorrect (e.g. number of emissions per 100 decays) when compared against the input.\n\n",branchSum);
+    }
+
+    decayNormalization = totalDecayIntensity/100.;
+    if (decayNormalization > 1+epsilon || decayNormalization < 1-epsilon) {
+        egsWarning("EGS_Ensdf::normalizeIntensities: Warning: The sum of all decay probabilities (%f) does not add to 100%! This means that all emission intensities will not match the input data, due to the necessary normalization for sampling. Emission intensities will be scaled by a factor of %f.\n\n",totalDecayIntensity, decayNormalization);
+    }
+
     for (unsigned int i=0; i < xrayIntensities.size(); ++i) {
         if (verbose > 1) {
             egsInformation("EGS_Ensdf::normalizeIntensities: XRay (E,I): %f %f\n",
@@ -1616,6 +1627,21 @@ void NormalizationRecord::processEnsdf() {
     normalizeBranch = recordToDouble(32, 39);
     normalizeBeta = recordToDouble(42, 49);
 
+    // If the normalization is not specified, it will get initialized to zero
+    // Change this to 1
+    if (normalizeRelative < epsilon) {
+        normalizeRelative = 1;
+    }
+    if (normalizeTransition < epsilon) {
+        normalizeTransition = 1;
+    }
+    if (normalizeBranch < epsilon) {
+        normalizeBranch = 1;
+    }
+    if (normalizeBeta < epsilon) {
+        normalizeBeta = 1;
+    }
+
     // Get the daughter element
     string element = egsTrimString(recordToString(4, 5));
 
@@ -1852,8 +1878,6 @@ void BetaPlusRecord::processEnsdf() {
     positronIntensity = recordToDouble(22, 29);
     ecIntensity = recordToDouble(32, 39);
 
-//     egsInformation("BetaPlusRecord::processEnsdf: (E,Ipos,Iec): %f %f %f\n",finalEnergy,positronIntensity,ecIntensity);
-
     if (getNormalizationRecord()) {
         positronIntensity *= getNormalizationRecord()->getBetaMultiplier() *
                              getNormalizationRecord()->getBranchMultiplier();
@@ -1892,6 +1916,8 @@ void BetaPlusRecord::processEnsdf() {
         double icM = getTag("CM=");
         double icN = getTag("CN=");
         double icO = getTag("CO=");
+        double icP = getTag("CP=");
+        double icQ = getTag("CQ=");
 
         // The K shell
         ecShellIntensity.push_back(icK);
@@ -1936,15 +1962,40 @@ void BetaPlusRecord::processEnsdf() {
             return;
         }
 
-        // The O1-5 shells
-        numShellsToInclude = min(21,nshell);
+        // The O1-7 shells
+        numShellsToInclude = min(23,nshell);
         for (unsigned int i=16; i<numShellsToInclude; ++i) {
             ecShellIntensity.push_back(ecShellIntensity.back() + icO/(numShellsToInclude-16));
         }
 
+        if (numShellsToInclude < 23) {
+//             for (int i=0; i<ecShellIntensity.size(); ++i) {
+//                 egsInformation("BetaPlusRecord::processEnsdf: Shell %d: P=%f\n",i,ecShellIntensity[i]);
+//             }
+            return;
+        }
+
+        // The P1-3 shells
+        numShellsToInclude = min(26,nshell);
+        for (unsigned int i=23; i<numShellsToInclude; ++i) {
+            ecShellIntensity.push_back(ecShellIntensity.back() + icP/(numShellsToInclude-23));
+        }
+
+        if (numShellsToInclude < 26) {
+//             for (int i=0; i<ecShellIntensity.size(); ++i) {
+//                 egsInformation("BetaPlusRecord::processEnsdf: Shell %d: P=%f\n",i,ecShellIntensity[i]);
+//             }
+            return;
+        }
+
+        // The Q1 shell
+        numShellsToInclude = 27;
+        ecShellIntensity.push_back(ecShellIntensity.back() + icQ/(numShellsToInclude-26));
+
 //         for (int i=0; i<ecShellIntensity.size(); ++i) {
 //             egsInformation("BetaPlusRecord::processEnsdf: Shell %d: P=%f\n",i,ecShellIntensity[i]);
 //         }
+        return;
     }
 }
 
@@ -2013,8 +2064,6 @@ void GammaRecord::processEnsdf() {
     decayEnergy = recordToDouble(10, 19) / 1000.; // Convert keV to MeV
     gammaIntensity = recordToDouble(22, 29);
 
-//     egsInformation("GammaRecord::processEnsdf: (E,I): %f %f\n",decayEnergy,gammaIntensity);
-
     if (getNormalizationRecord()) {
         gammaIntensity *=
             getNormalizationRecord()->getRelativeMultiplier() *
@@ -2022,7 +2071,6 @@ void GammaRecord::processEnsdf() {
     }
 
     icTotal = recordToDouble(56, 62);
-    transitionIntensity = gammaIntensity * (1+icTotal);
 
     if (icTotal > 0) {
         // Get the number of shells
@@ -2033,6 +2081,21 @@ void GammaRecord::processEnsdf() {
         double icM = getTag("MC=");
         double icN = getTag("NC=");
         double icO = getTag("OC=");
+        double icP = getTag("PC=");
+        double icQ = getTag("QC=");
+
+        // Use the sum of the individual shell intensities instead of the provided total
+        // Due to being measured by different experiments, they usually are not equal
+        double icSum = icK+icL+icM+icN+icO+icP+icQ;
+        icTotal = icSum;
+
+        // If the total intensity from the shells in zero, we're done
+        if (icTotal < epsilon) {
+            transitionIntensity = gammaIntensity;
+            return;
+        } else {
+            transitionIntensity = gammaIntensity * (1+icTotal);
+        }
 
         // The K shell
         icIntensity.push_back(icK / icTotal);
@@ -2077,15 +2140,44 @@ void GammaRecord::processEnsdf() {
             return;
         }
 
-        // The O1-5 shells
-        numShellsToInclude = min(21,nshell);
+        // The O1-7 shells
+        numShellsToInclude = min(23,nshell);
         for (unsigned int i=16; i<numShellsToInclude; ++i) {
             icIntensity.push_back(icIntensity.back() + (icO / icTotal)/(numShellsToInclude-16));
         }
 
+        if (numShellsToInclude < 23) {
+//             for (int i=0; i<icIntensity.size(); ++i) {
+//                 egsInformation("GammaRecord::processEnsdf: Shell %d: P=%f\n",i,icIntensity[i]);
+//             }
+            return;
+        }
+
+        // The P1-3 shells
+        numShellsToInclude = min(26,nshell);
+        for (unsigned int i=23; i<numShellsToInclude; ++i) {
+            icIntensity.push_back(icIntensity.back() + (icP / icTotal)/(numShellsToInclude-23));
+        }
+
+        if (numShellsToInclude < 26) {
+//             for (int i=0; i<icIntensity.size(); ++i) {
+//                 egsInformation("GammaRecord::processEnsdf: Shell %d: P=%f\n",i,icIntensity[i]);
+//             }
+            return;
+        }
+
+        // The Q1 shell
+        numShellsToInclude = 27;
+        icIntensity.push_back(icIntensity.back() + (icQ / icTotal)/(numShellsToInclude-26));
+
 //         for (int i=0; i<icIntensity.size(); ++i) {
 //             egsInformation("GammaRecord::processEnsdf: Shell %d: P=%f\n",i,icIntensity[i]);
 //         }
+        return;
+
+    }
+    else {
+        transitionIntensity = gammaIntensity * (1+icTotal);
     }
 }
 
@@ -2174,6 +2266,10 @@ AlphaRecord::AlphaRecord(vector<string> ensdf,
 void AlphaRecord::processEnsdf() {
     finalEnergy = recordToDouble(10, 19) / 1000.; // Convert keV to MeV
     alphaIntensity = recordToDouble(22, 29);
+
+    if (getNormalizationRecord()) {
+        alphaIntensity *= getNormalizationRecord()->getBranchMultiplier();
+    }
 }
 
 double AlphaRecord::getFinalEnergy() const {
